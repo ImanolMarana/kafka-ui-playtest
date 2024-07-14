@@ -284,98 +284,84 @@ public class TopicsService {
       KafkaCluster cluster,
       InternalTopic topic,
       ReplicationFactorChangeDTO replicationFactorChange) {
-    // Current assignment map (Partition number -> List of brokers)
+
     Map<Integer, List<Integer>> currentAssignment = getCurrentAssignment(topic);
-    // Brokers map (Broker id -> count)
     Map<Integer, Integer> brokersUsage = getBrokersMap(cluster, currentAssignment);
     int currentReplicationFactor = topic.getReplicationFactor();
 
-    // If we should to increase Replication factor
     if (replicationFactorChange.getTotalReplicationFactor() > currentReplicationFactor) {
-      // For each partition
-      for (var assignmentList : currentAssignment.values()) {
-        // Get brokers list sorted by usage
-        var brokers = brokersUsage.entrySet().stream()
-            .sorted(Map.Entry.comparingByValue())
-            .map(Map.Entry::getKey)
-            .collect(toList());
-
-        // Iterate brokers and try to add them in assignment
-        // while partition replicas count != requested replication factor
-        for (Integer broker : brokers) {
-          if (!assignmentList.contains(broker)) {
-            assignmentList.add(broker);
-            brokersUsage.merge(broker, 1, Integer::sum);
-          }
-          if (assignmentList.size() == replicationFactorChange.getTotalReplicationFactor()) {
-            break;
-          }
-        }
-        if (assignmentList.size() != replicationFactorChange.getTotalReplicationFactor()) {
-          throw new ValidationException("Something went wrong during adding replicas");
-        }
-      }
-
-      // If we should to decrease Replication factor
+      increaseReplicationFactor(replicationFactorChange, currentAssignment, brokersUsage);
     } else if (replicationFactorChange.getTotalReplicationFactor() < currentReplicationFactor) {
-      for (Map.Entry<Integer, List<Integer>> assignmentEntry : currentAssignment.entrySet()) {
-        var partition = assignmentEntry.getKey();
-        var brokers = assignmentEntry.getValue();
-
-        // Get brokers list sorted by usage in reverse order
-        var brokersUsageList = brokersUsage.entrySet().stream()
-            .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder()))
-            .map(Map.Entry::getKey)
-            .collect(toList());
-
-        // Iterate brokers and try to remove them from assignment
-        // while partition replicas count != requested replication factor
-        for (Integer broker : brokersUsageList) {
-          // Check is the broker the leader of partition
-          if (!topic.getPartitions().get(partition).getLeader()
-              .equals(broker)) {
-            brokers.remove(broker);
-            brokersUsage.merge(broker, -1, Integer::sum);
-          }
-          if (brokers.size() == replicationFactorChange.getTotalReplicationFactor()) {
-            break;
-          }
-        }
-        if (brokers.size() != replicationFactorChange.getTotalReplicationFactor()) {
-          throw new ValidationException("Something went wrong during removing replicas");
-        }
-      }
+      decreaseReplicationFactor(replicationFactorChange, topic, currentAssignment, brokersUsage);
     } else {
       throw new ValidationException("Replication factor already equals requested");
     }
 
-    // Return result map
     return currentAssignment.entrySet().stream().collect(toMap(
         e -> new TopicPartition(topic.getName(), e.getKey()),
         e -> Optional.of(new NewPartitionReassignment(e.getValue()))
     ));
   }
 
-  private Map<Integer, List<Integer>> getCurrentAssignment(InternalTopic topic) {
-    return topic.getPartitions().values().stream()
-        .collect(toMap(
-            InternalPartition::getPartition,
-            p -> p.getReplicas().stream()
-                .map(InternalReplica::getBroker)
-                .collect(toList())
-        ));
+  private void increaseReplicationFactor(
+      ReplicationFactorChangeDTO replicationFactorChange,
+      Map<Integer, List<Integer>> currentAssignment,
+      Map<Integer, Integer> brokersUsage) {
+
+    for (var assignmentList : currentAssignment.values()) {
+      var brokers = brokersUsage.entrySet().stream()
+          .sorted(Map.Entry.comparingByValue())
+          .map(Map.Entry::getKey)
+          .collect(toList());
+
+      for (Integer broker : brokers) {
+        if (!assignmentList.contains(broker)) {
+          assignmentList.add(broker);
+          brokersUsage.merge(broker, 1, Integer::sum);
+        }
+        if (assignmentList.size() == replicationFactorChange.getTotalReplicationFactor()) {
+          break;
+        }
+      }
+      if (assignmentList.size() != replicationFactorChange.getTotalReplicationFactor()) {
+        throw new ValidationException("Something went wrong during adding replicas");
+      }
+    }
   }
 
-  private Map<Integer, Integer> getBrokersMap(KafkaCluster cluster,
-                                              Map<Integer, List<Integer>> currentAssignment) {
-    Map<Integer, Integer> result = statisticsCache.get(cluster).getClusterDescription().getNodes()
-        .stream()
-        .map(Node::id)
-        .collect(toMap(
-            c -> c,
-            c -> 0
-        ));
-    currentAssignment.values().forEach(brokers -> brokers
+  private void decreaseReplicationFactor(
+      ReplicationFactorChangeDTO replicationFactorChange,
+      InternalTopic topic,
+      Map<Integer, List<Integer>> currentAssignment,
+      Map<Integer, Integer> brokersUsage) {
+
+    for (Map.Entry<Integer, List<Integer>> assignmentEntry : currentAssignment.entrySet()) {
+      var partition = assignmentEntry.getKey();
+      var brokers = assignmentEntry.getValue();
+
+      var brokersUsageList = brokersUsage.entrySet().stream()
+          .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder()))
+          .map(Map.Entry::getKey)
+          .collect(toList());
+
+      for (Integer broker : brokersUsageList) {
+        if (!topic.getPartitions().get(partition).getLeader()
+            .equals(broker)) {
+          brokers.remove(broker);
+          brokersUsage.merge(broker, -1, Integer::sum);
+        }
+        if (brokers.size() == replicationFactorChange.getTotalReplicationFactor()) {
+          break;
+        }
+      }
+      if (brokers.size() != replicationFactorChange.getTotalReplicationFactor()) {
+        throw new ValidationException("Something went wrong during removing replicas");
+      }
+    }
+  }
+
+
+//Refactoring end
         .forEach(broker -> result.put(broker, result.get(broker) + 1)));
 
     return result;
